@@ -5,6 +5,7 @@ import io
 import json
 import re
 from typing import List, Optional
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -19,18 +20,20 @@ from schemas import (
     PublicationCreate, ProjectCreate, InterestCreate
 )
 
-from google import genai
-from google.genai import types
+# AI & Presentation Libraries
+from groq import Groq
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
+load_dotenv()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Profound Academic API")
 
+# --- 1. Middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -39,14 +42,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# --- 2. Free High-Speed AI Engine (Unlimited Access) ---
+# Get your free key at https://console.groq.com/
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# --- 3. Professional Theme System ---
+THEMES = {
+    "Modern Minimalist": {"bg": "FFFFFF", "text": "1A1A1A", "accent": "4F46E5", "accent2": "F3F4F6"},
+    "Dark Mode Tech": {"bg": "0F172A", "text": "F8FAFC", "accent": "38BDF8", "accent2": "1E293B"},
+    "Classic Academic": {"bg": "FDFBF7", "text": "1E1E1E", "accent": "800000", "accent2": "E5E7EB"},
+    "Vibrant Creative": {"bg": "FFF7ED", "text": "431407", "accent": "F97316", "accent2": "FFEDD5"}
+}
 
 def clean_markdown(text: str) -> str:
     """Removes markdown formatting for clean slide text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', str(text)).replace('*', '').strip()
 
-
+# --- 4. User Authentication & Profile ---
 @app.post("/register")
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
     if db.query(UserDB).filter(UserDB.email == user.email.lower()).first():
@@ -71,42 +83,28 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
 @app.get("/profile/{user_id}")
 def get_profile(user_id: int, db: Session = Depends(get_db)):
     user = db.query(UserDB).filter(UserDB.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not user: raise HTTPException(status_code=404, detail="User not found")
     
     pubs = db.query(PublicationDB).filter(PublicationDB.user_id == user_id).all()
     courses = db.query(CourseDB).filter(CourseDB.user_id == user_id).all()
     projects = db.query(ProjectDB).filter(ProjectDB.user_id == user_id).all()
-    interests = db.query(InterestDB).filter(InterestDB.user_id == user_id).all()
     
     return {
-        "id": user.id,
-        "full_name": user.full_name,
-        "bio": user.bio,
-        "department": user.department,
+        "id": user.id, "full_name": user.full_name, "bio": user.bio, "department": user.department,
         "metrics": {
             "citations": sum(p.citations for p in pubs),
             "students": sum(c.students for c in courses),
-            "papers": len(pubs),
-            "projects": len(projects)
+            "papers": len(pubs), "projects": len(projects)
         },
-        "publications": pubs,
-        "courses": courses,
-        "projects": projects,
-        "interests": [i.name for i in interests]
+        "publications": pubs, "courses": courses, "projects": projects
     }
 
-
+# --- 5. Course & Student Excel Uploads ---
 @app.post("/courses-with-students")
 async def create_course_with_excel(
-    user_id: int = Form(...), 
-    code: str = Form(...), 
-    name: str = Form(...), 
-    semester: str = Form("TBA"), 
-    schedule: str = Form("TBA"), 
-    room: str = Form("TBA"), 
-    file: Optional[UploadFile] = File(None), 
-    db: Session = Depends(get_db)
+    user_id: int = Form(...), code: str = Form(...), name: str = Form(...), 
+    semester: str = Form("TBA"), schedule: str = Form("TBA"), room: str = Form("TBA"), 
+    file: Optional[UploadFile] = File(None), db: Session = Depends(get_db)
 ):
     student_count = 0
     df = None
@@ -115,9 +113,8 @@ async def create_course_with_excel(
         student_count = len(df)
         
     new_course = CourseDB(
-        user_id=user_id, code=code, name=name, 
-        semester=semester, students=student_count, 
-        status="active", schedule=schedule, room=room
+        user_id=user_id, code=code, name=name, semester=semester, 
+        students=student_count, status="active", schedule=schedule, room=room
     )
     db.add(new_course)
     db.flush() 
@@ -125,10 +122,8 @@ async def create_course_with_excel(
     if df is not None:
         for _, row in df.iterrows():
             db.add(StudentDB(
-                student_id=str(row['id']), 
-                name=row['name'], 
-                department=row.get('department', 'N/A'), 
-                course_id=new_course.id
+                student_id=str(row['id']), name=row['name'], 
+                department=row.get('department', 'N/A'), course_id=new_course.id
             ))
     db.commit()
     return {"message": "Success"}
@@ -137,84 +132,75 @@ async def create_course_with_excel(
 def get_courses(user_id: int, db: Session = Depends(get_db)):
     return db.query(CourseDB).filter(CourseDB.user_id == user_id).all()
 
-
-CANVAS_SYSTEM_PROMPT = """
-Act as the 'Gemini Canvas' Designer. 
-For every slide, you MUST define:
-1. 'bg_hex': A professional background hex color.
-2. 'accent_hex': A matching accent color for bars/titles.
-3. 'title_font' & 'body_font': Modern font pairings (e.g., 'Montserrat', 'Inter').
-4. 'image_prompt': A high-fidelity studio prompt for Nano Banana 2.
-5. 'content': 4-6 deeply detailed academic bullet points.
-6. 'speaker_notes': Deep professor-level explanation.
-Output strictly valid JSON.
-"""
-
+# --- 6. AI Lecture Generation (Unlimited Free Tier) ---
 @app.post("/api/generate-lecture")
 async def generate_lecture(data: LectureRequest):
+    prompt = f"""
+    Act as a University Professor. Topic: {data.topic}. Level: {data.course_level}. 
+    Slides: {data.pages_count}. Theme: {data.theme}. Instructions: {data.additional_instructions}.
+    Output strictly valid JSON with keys: "slides" [title, content[], speaker_notes].
+    """
     try:
-        response = client.models.generate_content(
-            model='gemini-3.1-flash',
-            contents=f"Topic: {data.topic}. Theme: {data.theme}. Level: {data.course_level}. Slide Count: {data.pages_count}.",
-            config=types.GenerateContentConfig(
-                system_instruction=CANVAS_SYSTEM_PROMPT,
-                response_mime_type="application/json"
-            )
+        # Llama 3.3 70B provides PhD-level logic for free with high rate limits
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": "JSON-only academic generator."}, 
+                      {"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
         )
-        return json.loads(response.text)
+        return json.loads(completion.choices[0].message.content)
     except Exception as e:
-        status_code = 429 if "429" in str(e) else 500
-        raise HTTPException(status_code=status_code, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
+# --- 7. Professional PPTX Designer Engine ---
 @app.post("/api/export-pptx")
 async def export_pptx(data: dict):
     try:
+        theme = THEMES.get(data.get('theme'), THEMES['Modern Minimalist'])
         prs = Presentation()
         prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5) 
 
-        for slide_data in data.get('slides', []):
+        for i, slide_data in enumerate(data.get('slides', [])):
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
-            bg_hex = slide_data.get("bg_hex", "FFFFFF").lstrip("#")
-            accent_hex = slide_data.get("accent_hex", "9333EA").lstrip("#")
-            
+            # Apply Background Theme
             slide.background.fill.solid()
-            slide.background.fill.fore_color.rgb = RGBColor.from_string(bg_hex)
+            slide.background.fill.fore_color.rgb = RGBColor.from_string(theme["bg"])
             
-            circle = slide.shapes.add_shape(
-                MSO_SHAPE.OVAL, Inches(10), Inches(-1.5), Inches(5), Inches(5)
-            )
-            circle.fill.solid()
-            circle.fill.fore_color.rgb = RGBColor.from_string(accent_hex)
-            circle.line.fill.background()
+            # Design: Professional Accent Bar
+            bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(0.12), Inches(7.5))
+            bar.fill.solid()
+            bar.fill.fore_color.rgb = RGBColor.from_string(theme["accent"])
+            bar.line.fill.background()
 
-            title_box = slide.shapes.add_textbox(Inches(0.8), Inches(1), Inches(9), Inches(1.5))
+            is_title = (i == 0)
+            
+            # Title Layout Logic
+            top = Inches(2.5) if is_title else Inches(0.5)
+            title_box = slide.shapes.add_textbox(Inches(0.8), top, Inches(11.5), Inches(1.5))
             tf = title_box.text_frame
-            tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = clean_markdown(slide_data.get("title", "Untitled"))
-            p.font.size = Pt(44)
+            p.text = clean_markdown(slide_data.get("title", "Untitled")).upper() if is_title else clean_markdown(slide_data.get("title", "Untitled"))
+            p.font.size = Pt(54) if is_title else Pt(40)
             p.font.bold = True
-            p.font.name = slide_data.get("title_font", "Montserrat")
-            p.font.color.rgb = RGBColor.from_string(accent_hex)
+            p.font.color.rgb = RGBColor.from_string(theme["accent"])
+            if is_title: p.alignment = PP_ALIGN.CENTER
 
-            body_box = slide.shapes.add_textbox(Inches(0.8), Inches(2.5), Inches(8), Inches(4))
-            body_tf = body_box.text_frame
-            body_tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-            
-            for point in slide_data.get("content", []):
-                p = body_tf.add_paragraph()
-                p.text = f"• {clean_markdown(point)}"
-                p.font.size = Pt(22)
-                p.font.name = slide_data.get("body_font", "Inter")
-                p.space_after = Pt(10)
+            # Content Layout Logic
+            if not is_title:
+                body_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(11.5), Inches(4.8))
+                body_tf = body_box.text_frame
+                body_tf.word_wrap = True
+                for point in slide_data.get("content", []):
+                    p = body_tf.add_paragraph()
+                    p.text = f"• {clean_markdown(point)}"
+                    p.font.size = Pt(22)
+                    p.font.color.rgb = RGBColor.from_string(theme["text"])
+                    p.space_after = Pt(12)
 
         stream = io.BytesIO()
         prs.save(stream)
         stream.seek(0)
-        return StreamingResponse(
-            stream, 
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        )
+        return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
