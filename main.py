@@ -5,22 +5,24 @@ import json
 import re
 import uuid
 import datetime
+import pandas as pd
 from typing import List, Optional
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import engine, Base, get_db
 from models import (UserDB, CourseDB, StudentDB, PublicationDB,
-                    ProjectDB, InterestDB, ExamDB, QuestionDB, SubmissionDB)
+                    ProjectDB, InterestDB, ExamDB, QuestionDB, SubmissionDB,PerformanceDB ,ErrorAnalysisDB ,AssignmentDB)
 from schemas import (UserCreate, UserLogin, UserUpdate,
                     LectureRequest, CourseResponse, ExamRequest,
                     ExamResponse, Question,
                     ChangePasswordRequest, VerifyPasswordRequest)
-
+from routes import analysis
 from groq import Groq
 from docx import Document
 
@@ -360,3 +362,178 @@ async def grade_essay(submission_id: int, db: Session = Depends(get_db)):
         return {"status": "success", "grade": submission.ai_grade}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# ---upload grade and attendence---
+@app.post("/upload-performance")
+async def upload_performance_sheet(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    content = await file.read()
+    if file.filename.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    else:
+        df = pd.read_excel(io.BytesIO(content))
+
+    required_columns = ["student_id", "course_id", "grade", "attendance"]
+    if not all(col in df.columns for col in required_columns):
+        raise HTTPException(
+            status_code=400, 
+            detail="Sheet must have: student_id, course_id, grade, and attendance"
+        )
+
+    records_added = 0
+    for _, row in df.iterrows():
+        current_student_id = str(row["student_id"])
+        current_course_id = int(row["course_id"])
+
+        student = db.query(StudentDB).filter(
+            StudentDB.student_id == current_student_id,
+            StudentDB.course_id == current_course_id
+        ).first()
+
+        if student:
+            new_perf = PerformanceDB(
+                student_id=student.id,
+                course_id=current_course_id, 
+                grade=float(row["grade"]),
+                attendance=float(row["attendance"])
+            )
+            db.add(new_perf)
+            records_added += 1
+
+    db.commit()
+    return {"message": f"Successfully processed {records_added} records from the sheet"}    
+
+
+@app.get("/analysis/common-errors")
+def common_error_analysis(
+    course_id: int,
+    db: Session = Depends(get_db)
+):
+
+    total_errors = db.query(func.count(ErrorAnalysisDB.id)).filter(
+        ErrorAnalysisDB.course_id == course_id
+    ).scalar()
+
+    categories = db.query(
+        ErrorAnalysisDB.error_category,
+        func.count(ErrorAnalysisDB.id).label("count")
+    ).filter(
+        ErrorAnalysisDB.course_id == course_id
+    ).group_by(
+        ErrorAnalysisDB.error_category
+    ).all()
+
+    result = []
+
+    for cat in categories:
+
+        percentage = (cat.count / total_errors) * 100
+
+        error_types = db.query(
+            ErrorAnalysisDB.error_type,
+            func.count(ErrorAnalysisDB.id).label("count"),
+            func.count(func.distinct(ErrorAnalysisDB.student_id)).label("students")
+        ).filter(
+            ErrorAnalysisDB.course_id == course_id,
+            ErrorAnalysisDB.error_category == cat.error_category
+        ).group_by(
+            ErrorAnalysisDB.error_type
+        ).all()
+
+        patterns = []
+
+        for e in error_types:
+
+            patterns.append({
+                "error_type": e.error_type,
+                "occurrences": e.count,
+                "affected_students": e.students
+            })
+
+        result.append({
+            "category": cat.error_category,
+            "total_errors": cat.count,
+            "percentage": round(percentage,2),
+            "patterns": patterns
+        })
+
+    return result
+
+@app.get("/analysis/department-benchmarks")
+def department_benchmarks(course_id: int, db: Session = Depends(get_db)):
+
+    course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+
+    department = course.department
+
+    your_avg_grade = db.query(func.avg(PerformanceDB.grade)).filter(
+        PerformanceDB.course_id == course_id
+    ).scalar()
+
+    dept_avg_grade = db.query(func.avg(PerformanceDB.grade)).join(
+        CourseDB, PerformanceDB.course_id == CourseDB.id
+    ).filter(
+        CourseDB.department == department
+    ).scalar()
+
+    your_attendance = db.query(func.avg(PerformanceDB.attendance)).filter(
+        PerformanceDB.course_id == course_id
+    ).scalar()
+
+    dept_attendance = db.query(func.avg(PerformanceDB.attendance)).join(
+        CourseDB, PerformanceDB.course_id == CourseDB.id
+    ).filter(
+        CourseDB.department == department
+    ).scalar()
+
+    your_pass_rate = db.query(
+        func.count().filter(PerformanceDB.grade >= 50) * 100.0 / func.count()
+    ).filter(
+        PerformanceDB.course_id == course_id
+    ).scalar()
+
+    dept_pass_rate = db.query(
+        func.count().filter(PerformanceDB.grade >= 50) * 100.0 / func.count()
+    ).join(
+        CourseDB, PerformanceDB.course_id == CourseDB.id
+    ).filter(
+        CourseDB.department == department
+    ).scalar()
+    your_assignment_completion = db.query(
+        func.count().filter(AssignmentDB.is_submitted == True) * 100.0 / func.count()
+    ).filter(
+        AssignmentDB.course_id == course_id
+    ).scalar() or 0.0
+
+    dept_assignment_completion = db.query(
+        func.count().filter(AssignmentDB.is_submitted == True) * 100.0 / func.count()
+    ).join(
+        CourseDB, AssignmentDB.course_id == CourseDB.id
+    ).filter(
+        CourseDB.department == department
+    ).scalar() or 0.0
+    return {
+        "average_grade": {
+            "course": round(your_avg_grade,1),
+            "department": round(dept_avg_grade,1),
+            "difference": round(dept_avg_grade - your_avg_grade,1)
+        },
+        "pass_rate": {
+            "course": round(your_pass_rate,1),
+            "department": round(dept_pass_rate,1),
+            "difference": round(dept_pass_rate - your_pass_rate,1)
+        },
+        "attendance_rate": {
+            "course": round(your_attendance,1),
+            "department": round(dept_attendance,1),
+            "difference": round(dept_attendance - your_attendance,1)
+        },
+        "assignment_completion": {
+            "course": round(your_assignment_completion, 1),
+            "department": round(dept_assignment_completion, 1),
+            "difference": round(dept_assignment_completion - your_assignment_completion, 1)
+        }
+    }
+app.include_router(analysis.router)     

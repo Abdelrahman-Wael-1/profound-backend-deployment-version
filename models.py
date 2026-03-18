@@ -1,5 +1,5 @@
 from database import Base
-from sqlalchemy import Column, String, Integer, Text, ForeignKey, Boolean, DateTime, TIMESTAMP, JSON
+from sqlalchemy import Column, String, Integer, Text, ForeignKey, Boolean, DateTime, TIMESTAMP, JSON ,Float ,func
 import datetime
 
 class UserDB(Base):
@@ -23,6 +23,7 @@ class CourseDB(Base):
     schedule = Column(String, default="TBA") 
     room = Column(String, default="TBA") 
     progress = Column(Integer, default=0) 
+    department = Column(String(100), nullable=True)
 
 class StudentDB(Base):
     __tablename__ = "students"
@@ -80,3 +81,29 @@ class SubmissionDB(Base):
     ai_grade = Column(Integer, nullable=True)
     plagiarism_score = Column(Integer, nullable=True)
     essay_content = Column(Text, nullable=True)
+    
+class PerformanceDB(Base):
+    __tablename__ = "performance"
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"))
+    course_id = Column(Integer, ForeignKey("courses.id"))
+    grade = Column(Float)
+    attendance = Column(Integer)
+    created_at = Column(DateTime, default=func.now())
+
+class ErrorAnalysisDB(Base):
+    __tablename__ = "error_analysis"
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"))
+    course_id = Column(Integer, ForeignKey("courses.id"))
+    assignment_name = Column(String)
+    error_category = Column(String)
+    error_type = Column(String)  
+    
+class AssignmentDB(Base):
+    __tablename__ = "assignments"
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"))
+    assignment_name = Column(String(100))
+    is_submitted = Column(Boolean, default=False)     
