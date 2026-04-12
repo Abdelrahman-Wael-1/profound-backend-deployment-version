@@ -38,6 +38,11 @@ try:
 except ImportError:
     create_pptx = None
 
+try:
+    from services.ai_lecture_generation_service import generate_lecture_json
+except ImportError:
+    from ai_lecture_generation_service import generate_lecture_json
+
 load_dotenv()
 Base.metadata.create_all(bind=engine)
 
@@ -232,19 +237,36 @@ async def export_exam_word(exam_id: str, db: Session = Depends(get_db)):
 # --- Lecture Generation ---
 @app.post("/api/generate-lecture")
 async def generate_lecture(data: LectureRequest):
-    prompt = f"Act as a University Professor. Topic: {data.topic}. Output strictly JSON slides."
+    """
+    Generate lecture slides using the AI service.
+    Always returns {"slides": [...]} with validated structure.
+    """
+    return generate_lecture_json(data)
+
+
+def _build_pptx_response(data: dict):
+    """Create a PPTX streaming response from slide data."""
+    if create_pptx is None:
+        raise HTTPException(status_code=500, detail="PowerPoint service not available. Install python-pptx.")
+    if not data.get("slides"):
+        raise HTTPException(status_code=400, detail="No slides provided")
     try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "Professional JSON lecture generator."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"}
+        file_stream = create_pptx(data)
+        return StreamingResponse(
+            file_stream,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": "attachment; filename=lecture.pptx"}
         )
-        return json.loads(completion.choices[0].message.content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/export-pptx")
+async def export_pptx(data: dict):
+    return _build_pptx_response(data)
+
+@app.post("/export-pptx")
+async def export_pptx_alias(data: dict):
+    return _build_pptx_response(data)
 
 @app.get("/professors/{user_id}/courses", response_model=List[CourseResponse])
 def get_courses(user_id: int, db: Session = Depends(get_db)):

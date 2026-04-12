@@ -68,9 +68,11 @@ class LectureRequest(BaseModel):
     topic: str
     course_level: str
     pages_count: int
-    additional_instructions: str
-    include_media: bool
-    theme: str
+    additional_instructions: str = ""
+    include_media: bool = False
+    theme: str = "Modern Minimalist"
+    # Optional professor-supplied sources (comma-separated or list)
+    custom_sources: Optional[str] = None
 
 class Question(BaseModel):
     question_text: str
