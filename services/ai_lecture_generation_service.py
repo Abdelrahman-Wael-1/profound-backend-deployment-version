@@ -17,41 +17,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MAX_SLIDES = 70
 MIN_SLIDES = 3
 
-DOMAIN_SOURCES = {
-    "computer":        ["Cormen et al. – Introduction to Algorithms (MIT Press)", "Tanenbaum – Modern Operating Systems", "IEEE Xplore", "ACM Digital Library"],
-    "database":        ["Ramakrishnan & Gehrke – Database Management Systems", "Silberschatz – Database System Concepts (7th ed.)", "ACM SIGMOD"],
-    "machine learning":["Bishop – Pattern Recognition and ML (Springer)", "Goodfellow – Deep Learning (MIT Press)", "ArXiv.org", "NeurIPS Proceedings"],
-    "deep learning":   ["Goodfellow – Deep Learning (MIT Press)", "LeCun et al. – Nature 2015", "fast.ai Notes"],
-    "ai":              ["Russell & Norvig – AI: A Modern Approach (4th ed.)", "Stanford CS221 Notes", "DeepMind Research Blog"],
-    "software":        ["Pressman – Software Engineering (8th ed.)", "Clean Code – Robert C. Martin", "IEEE Software Journal"],
-    "network":         ["Kurose & Ross – Computer Networking (8th ed.)", "Tanenbaum – Computer Networks (5th ed.)", "RFC Archive at IETF"],
-    "security":        ["Stallings – Cryptography and Network Security", "Anderson – Security Engineering (3rd ed.)", "OWASP Foundation"],
-    "data structure":  ["Cormen – Introduction to Algorithms", "Sedgewick – Algorithms (4th ed.)", "Weiss – Data Structures and Algorithm Analysis"],
-    "operating":       ["Tanenbaum – Modern Operating Systems (4th ed.)", "Silberschatz – Operating System Concepts", "Linux Kernel Docs"],
-    "math":            ["Stewart – Calculus (8th ed.)", "Strang – Linear Algebra (MIT OCW)", "Wolfram MathWorld"],
-    "physics":         ["Halliday, Resnick & Krane – Physics (5th ed.)", "The Feynman Lectures on Physics", "Physical Review Letters"],
-    "default":         ["MIT OpenCourseWare", "Springer Academic", "Elsevier ScienceDirect", "Oxford Academic", "Cambridge University Press"],
-}
 
-MEDIA_LINKS = {
-    "computer":        [{"title": "CS50 – Harvard Intro to CS", "url": "https://cs50.harvard.edu/x"}, {"title": "MIT OCW – Computer Science", "url": "https://ocw.mit.edu/search/?d=Electrical+Engineering+and+Computer+Science"}],
-    "database":        [{"title": "CMU Database Group Lectures", "url": "https://www.youtube.com/@CMUDatabaseGroup"}, {"title": "Stanford DB – edX", "url": "https://www.edx.org/learn/databases"}],
-    "machine learning":[{"title": "Andrew Ng – ML Specialization", "url": "https://www.coursera.org/specializations/machine-learning-introduction"}, {"title": "fast.ai", "url": "https://www.fast.ai"}, {"title": "Google ML Crash Course", "url": "https://developers.google.com/machine-learning/crash-course"}],
-    "deep learning":   [{"title": "fast.ai Practical Deep Learning", "url": "https://www.fast.ai"}, {"title": "MIT 6.S191", "url": "http://introtodeeplearning.com"}],
-    "ai":              [{"title": "Stanford CS221", "url": "https://stanford-cs221.github.io/autumn2024/"}, {"title": "MIT 6.034", "url": "https://ocw.mit.edu/courses/6-034-artificial-intelligence-fall-2010/"}],
-    "data structure":  [{"title": "Visualgo – Algorithm Visualizations", "url": "https://visualgo.net"}, {"title": "Princeton Algorithms (Coursera)", "url": "https://www.coursera.org/learn/algorithms-part1"}],
-    "math":            [{"title": "3Blue1Brown – Visual Math", "url": "https://www.3blue1brown.com"}, {"title": "MIT OCW Mathematics", "url": "https://ocw.mit.edu/search/?d=Mathematics"}],
-    "physics":         [{"title": "The Feynman Lectures Online", "url": "https://www.feynmanlectures.caltech.edu"}, {"title": "MIT OCW – Physics", "url": "https://ocw.mit.edu/search/?d=Physics"}],
-    "default":         [{"title": "MIT OpenCourseWare", "url": "https://ocw.mit.edu"}, {"title": "Coursera", "url": "https://www.coursera.org"}, {"title": "edX", "url": "https://www.edx.org"}],
-}
-
-
-def _pick(topic: str, lookup: dict) -> list:
-    t = topic.lower()
-    for key in lookup:
-        if key in t:
-            return lookup[key]
-    return lookup["default"]
 
 
 def _depth_instruction(total: int) -> str:
@@ -87,7 +53,7 @@ def _make_batches(total: int) -> list:
         batches.append((i, end, "core"))
         i = end + 1
 
-    # Outro batch (summary + references)
+    # Outro batch (summary)
     if summary_start <= total:
         batches.append((summary_start, total, "outro"))
 
@@ -131,20 +97,19 @@ def _parse_json_safe(text: str) -> dict:
 
 
 def _gen_batch(start: int, end: int, role: str, total: int,
-               topic: str, level: str, prof_note: str,
+               topic: str, prof_note: str,
                sources: list, depth: str) -> list:
     count = end - start + 1
 
     if role == "intro":
         structure = (
-            "Slide 1: Title slide (topic title, academic level, brief tagline)\n"
+            "Slide 1: Title slide (topic title, brief tagline)\n"
             "Slide 2: Learning Objectives (5-6 measurable outcomes using Bloom's verbs)\n"
             "Slide 3: Lecture Overview / Roadmap (list main sections)"
         )
     elif role == "outro":
         structure = (
-            f"Slide {start}: Summary & Key Takeaways — synthesise the most important concepts\n"
-            f"Slide {end}: References & Further Reading — list trusted academic sources"
+            f"Slide {start}: Summary & Key Takeaways — synthesise the most important concepts"
         )
     else:
         structure = (
@@ -153,12 +118,31 @@ def _gen_batch(start: int, end: int, role: str, total: int,
             f"This is part of a {total}-slide lecture — maintain logical progression."
         )
 
+    # Build a strong professor-instructions block
+    has_custom_instructions = (
+        prof_note
+        and prof_note.strip()
+        and prof_note.strip() != "Produce a thorough, student-friendly academic lecture."
+    )
+    if has_custom_instructions:
+        prof_block = f"""
+⚠️  PROFESSOR INSTRUCTIONS — MANDATORY — APPLY IN EVERY SLIDE:
+{prof_note}
+
+You MUST follow these instructions literally in the slide content:
+- If bilingual output is requested (e.g. Arabic+English), add the translation on every bullet point headline
+- If a teaching style is specified (e.g. Socratic, problem-based), apply it throughout
+- If specific examples, case studies, or topics are named, include them explicitly
+- If formatting or structural preferences are given, honour them
+These override any default behaviour.
+"""
+    else:
+        prof_block = f"Instructions: {prof_note}"
+
     prompt = f"""You are a university professor generating lecture slides {start} to {end} (out of {total} total) on "{topic}".
 
-Level: {level}
 Depth requirement: {depth}
-Instructions: {prof_note}
-Sources: {", ".join(sources[:3])}
+{prof_block}
 
 Slide structure for this batch:
 {structure}
@@ -171,7 +155,7 @@ Return EXACTLY {count} slide objects in this JSON structure:
       {{"headline":"Bold headline in 5-7 words","detail":"2-3 sentences explaining this in depth with mechanism and significance."}}
     ],
     "example":"Concrete real-world example using specific named systems or algorithms. Empty string if not applicable.",
-    "image_suggestion":"Short description of a helpful diagram, or null",
+    "image_suggestion":"Specific visual description for a diagram, chart, or illustration that would enhance this slide (e.g. 'flowchart of TCP three-way handshake', 'bar chart comparing sorting algorithm complexities'). Never null — every slide needs a visual.",
     "speaker_notes":"3-4 sentences: what to emphasize, questions to ask, connections to make."
   }}
 ]}}
@@ -182,7 +166,8 @@ STRICT RULES:
 - Root JSON key MUST be "slides"
 - No markdown, no code fences, no text before or after the JSON
 - Keep each point detail concise to avoid response truncation
-- example field must be a plain string"""
+- example field must be a plain string
+- image_suggestion must always be a specific, descriptive string — never null or empty"""
 
     try:
         c = client.chat.completions.create(
@@ -290,16 +275,10 @@ def generate_lecture_json(data) -> dict:
     requested = max(MIN_SLIDES, min(int(data.pages_count), MAX_SLIDES))
 
     topic      = data.topic
-    level      = data.course_level
     additional = getattr(data, "additional_instructions", "") or ""
-    inc_media  = getattr(data, "include_media", False)
     custom_src = getattr(data, "custom_sources", "") or ""
 
-    trusted = _pick(topic, DOMAIN_SOURCES)
-    if custom_src:
-        src = [s.strip() for s in custom_src.split(",") if s.strip()] + trusted
-    else:
-        src = trusted
+    src = [s.strip() for s in custom_src.split(",") if s.strip()] if custom_src else []
 
     prof_note = additional or "Produce a thorough, student-friendly academic lecture."
     depth     = _depth_instruction(requested)
@@ -307,7 +286,7 @@ def generate_lecture_json(data) -> dict:
     # ── Chunked generation ────────────────────────────────────────
     all_slides = []
     for (start, end, role) in _make_batches(requested):
-        batch = _gen_batch(start, end, role, requested, topic, level, prof_note, src, depth)
+        batch = _gen_batch(start, end, role, requested, topic, prof_note, src, depth)
         all_slides.extend(batch)
 
     # ── Trim or pad to exact requested count ──────────────────────
@@ -315,7 +294,7 @@ def generate_lecture_json(data) -> dict:
     while len(all_slides) < requested:
         all_slides.append({
             "title":            f"Additional Content {len(all_slides) + 1}",
-            "points":           [{"headline": "Further Discussion", "detail": f"Additional content on {topic}."}],
+            "points":           [{"headline": "Additional Content", "detail": f"Additional content on {topic}."}],
             "example":          "",
             "image_suggestion": None,
             "speaker_notes":    "",
@@ -342,16 +321,6 @@ def generate_lecture_json(data) -> dict:
         except Exception:
             pass
 
-    # ── Append media resources slide if requested ─────────────────
-    if inc_media:
-        ml = _pick(topic, MEDIA_LINKS)
-        all_slides.append({
-            "title":         "Further Learning & Academic Resources",
-            "points":        [{"headline": l["title"], "detail": l["url"]} for l in ml[:5]],
-            "example":       f"Visit MIT OpenCourseWare (ocw.mit.edu) for free university-level materials on {topic}.",
-            "image_suggestion": None,
-            "speaker_notes": f"Direct students to these verified resources for self-study on {topic}.",
-        })
 
     if not all_slides:
         raise HTTPException(status_code=500, detail="Generation failed. Please try again.")

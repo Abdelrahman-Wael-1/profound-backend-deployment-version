@@ -9,8 +9,10 @@ Fixes:
 - Professor manual text shown as highlighted note box
 """
 import io
+import json
 import base64
 import urllib.request
+import urllib.parse
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -34,7 +36,6 @@ THEMES = {
         "divider":   (0xC7, 0xD2, 0xFE),
         "badge_bg":  (0x4F, 0x46, 0xE5),
         "badge_txt": (0xFF, 0xFF, 0xFF),
-        "ref_txt":   (0x4F, 0x46, 0xE5),
     },
     "Dark Mode Tech": {
         "bg":        (0x0F, 0x17, 0x2A),
@@ -53,7 +54,6 @@ THEMES = {
         "divider":   (0x1E, 0x40, 0x4F),
         "badge_bg":  (0x38, 0xBD, 0xF8),
         "badge_txt": (0x0F, 0x17, 0x2A),
-        "ref_txt":   (0x38, 0xBD, 0xF8),
     },
     "Classic Academic": {
         "bg":        (0xFD, 0xFB, 0xF7),
@@ -72,7 +72,6 @@ THEMES = {
         "divider":   (0xD9, 0xC5, 0xB2),
         "badge_bg":  (0x80, 0x00, 0x00),
         "badge_txt": (0xFF, 0xFF, 0xFF),
-        "ref_txt":   (0x80, 0x00, 0x00),
     },
     "Vibrant Creative": {
         "bg":        (0xFF, 0xFF, 0xFF),
@@ -91,7 +90,6 @@ THEMES = {
         "divider":   (0xFE, 0xD7, 0xAA),
         "badge_bg":  (0xF9, 0x73, 0x16),
         "badge_txt": (0xFF, 0xFF, 0xFF),
-        "ref_txt":   (0xF9, 0x73, 0x16),
     },
 }
 
@@ -157,26 +155,74 @@ def _extract_point(pt) -> tuple[str, str]:
     return str(pt).strip(), ""
 
 
-def _fetch_unsplash(query: str) -> bytes | None:
-    """Fetch an image from Unsplash. Returns bytes or None on failure."""
+def _fetch_image(query: str) -> bytes | None:
+    """
+    Fetch a relevant image for a slide.
+    Strategy:
+      1. Try Wikimedia Commons API (topic-relevant diagrams/photos, CC licensed)
+      2. Fall back to Lorem Picsum (abstract placeholder, always works)
+    Returns bytes or None on failure.
+    """
     if not query:
         return None
+
+    # ── 1. Wikimedia Commons search ───────────────────────────────
     try:
-        clean = query.strip().replace(" ", "+")
-        url   = f"https://source.unsplash.com/featured/800x450/?{clean}"
-        req   = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        clean = query.strip()
+        # Search Commons for the query
+        search_url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&list=search&srsearch={urllib.request.quote(clean)}"
+            "&srnamespace=6&srlimit=1&format=json"
+        )
+        req = urllib.request.Request(search_url, headers={"User-Agent": "LectureGen/1.0"})
         with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+            results = data.get("query", {}).get("search", [])
+            if results:
+                title = results[0]["title"]  # e.g. "File:TCP_handshake.svg"
+                # Get image URL from Commons
+                img_url = (
+                    "https://en.wikipedia.org/w/api.php"
+                    f"?action=query&titles={urllib.request.quote(title)}"
+                    "&prop=imageinfo&iiprop=url&format=json"
+                )
+                req2 = urllib.request.Request(img_url, headers={"User-Agent": "LectureGen/1.0"})
+                with urllib.request.urlopen(req2, timeout=6) as resp2:
+                    idata = json.loads(resp2.read().decode())
+                    pages = idata.get("query", {}).get("pages", {})
+                    for page in pages.values():
+                        img_info = page.get("imageinfo", [])
+                        if img_info:
+                            direct_url = img_info[0]["url"]
+                            req3 = urllib.request.Request(direct_url, headers={"User-Agent": "LectureGen/1.0"})
+                            with urllib.request.urlopen(req3, timeout=8) as resp3:
+                                if resp3.status == 200:
+                                    img_bytes = resp3.read()
+                                    # Only accept raster images (not SVG — pptx-python can't render SVG)
+                                    if img_bytes[:4] in (b'\x89PNG', b'\xff\xd8\xff', b'GIF8') or img_bytes[:2] == b'BM':
+                                        return img_bytes
+    except Exception:
+        pass
+
+    # ── 2. Picsum fallback (abstract photo, always works) ─────────
+    try:
+        # Use query hash for consistent image per topic
+        seed = abs(hash(query)) % 1000
+        url  = f"https://picsum.photos/seed/{seed}/800/450"
+        req  = urllib.request.Request(url, headers={"User-Agent": "LectureGen/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
             if resp.status == 200:
                 return resp.read()
     except Exception:
         pass
+
     return None
 
 
 def create_pptx(data: dict) -> io.BytesIO:
     theme_name  = data.get("theme", "Modern Minimalist")
     c           = THEMES.get(theme_name, THEMES["Modern Minimalist"])
-    course_lvl  = str(data.get("course_level", ""))
     slides_data = data.get("slides", [])
 
     if not slides_data:
@@ -196,7 +242,6 @@ def create_pptx(data: dict) -> io.BytesIO:
         slide    = prs.slides.add_slide(prs.slide_layouts[6])
         title    = str(sd.get("title", "Slide")).strip()
         is_title = (idx == 0)
-        is_ref   = any(k in title.lower() for k in ("reference", "further", "resource"))
 
         # ── Safely get all fields ─────────────────────────────────
         raw_points  = sd.get("points", [])
@@ -226,8 +271,6 @@ def create_pptx(data: dict) -> io.BytesIO:
             _oval(slide, Inches(10.0), Inches(4.2),  Inches(4.0), Inches(4.0), c["accent2"])
             tf = _tb(slide, Inches(1.1), Inches(1.8), Inches(9.0), Inches(2.8))
             _para(tf, title, 46, True, c["title_txt"], PP_ALIGN.LEFT)
-            if course_lvl:
-                _para(tf, course_lvl, 20, False, c["accent"], PP_ALIGN.LEFT, space_before=8)
             _rect(slide, Inches(1.1), Inches(4.75), Inches(3.0), Inches(0.07), c["accent"])
             if notes:
                 slide.notes_slide.notes_text_frame.text = notes
@@ -244,20 +287,6 @@ def create_pptx(data: dict) -> io.BytesIO:
         _para(ttf, title, 26, True, c["title_txt"])
         _rect(slide, Inches(0.22), Inches(0.93), Inches(12.8), Inches(0.035), c["accent"])
 
-        # ══════════════════════════════════════════════════════════
-        # REFERENCE SLIDE
-        # ══════════════════════════════════════════════════════════
-        if is_ref:
-            ctf = _tb(slide, Inches(0.35), Inches(1.05), Inches(12.6), Inches(5.8))
-            for pt in raw_points:
-                hl, det = _extract_point(pt)   # ← safe for str or dict
-                _para(ctf, f"  {hl}", 16, True, c["headline"], space_before=14)
-                if det:
-                    col = c["ref_txt"] if det.startswith("http") else c["detail"]
-                    _para(ctf, f"  {det}", 13, False, col, space_before=2)
-            if notes:
-                slide.notes_slide.notes_text_frame.text = notes
-            continue
 
         # ══════════════════════════════════════════════════════════
         # CONTENT SLIDE
@@ -267,10 +296,10 @@ def create_pptx(data: dict) -> io.BytesIO:
         has_img   = False
         img_bytes: bytes | None = None
 
-        # AI-suggested image via Unsplash
+        # AI-suggested image via Wikimedia / Picsum
         if img_query:
             if img_query not in _img_cache:
-                _img_cache[img_query] = _fetch_unsplash(img_query)
+                _img_cache[img_query] = _fetch_image(img_query)
             img_bytes = _img_cache[img_query]
             has_img   = img_bytes is not None
 
