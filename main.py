@@ -23,12 +23,14 @@ import database
 from database import engine, Base, get_db
 from models import (UserDB, CourseDB, StudentDB, PublicationDB,
                     ProjectDB, InterestDB, ExamDB, QuestionDB, SubmissionDB, PerformanceDB, ErrorAnalysisDB,
-                    AssignmentDB, GradeUpdate, FinalizeRequest)
+                    AssignmentDB, GradeUpdate, FinalizeRequest, LectureSlotDB)
 from schemas import (UserCreate, UserLogin, UserUpdate,
                     LectureRequest, CourseResponse, ExamRequest,
                     ExamResponse, Question,AssignmentCreate,CourseCreate,
                     ChangePasswordRequest, VerifyPasswordRequest)
 from routes import analysis
+from routes import lecture
+from routes import courses as courses_router
 from groq import Groq
 from docx import Document
 
@@ -66,7 +68,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY_ANALYSIS"))
 
 def clean_markdown(text: str) -> str:
     text_str = str(text)
@@ -189,7 +191,15 @@ async def generate_exam(request: ExamRequest, db: Session = Depends(get_db)):
         for q in all_questions:
             q_text = q.get("question_text") or q.get("question")
             q_options = q.get("options")
-            q_answer = q.get("correct_answer") or q.get("answer")
+            raw_answer = q.get("correct_answer") or q.get("answer")
+            # AI sometimes returns int index (0-3) or letter (A-D) instead of full option text
+            if isinstance(raw_answer, int) and q_options and 0 <= raw_answer < len(q_options):
+                q_answer = str(q_options[raw_answer])
+            elif isinstance(raw_answer, str) and len(raw_answer) == 1 and raw_answer.upper() in "ABCD" and q_options:
+                idx = ord(raw_answer.upper()) - ord('A')
+                q_answer = str(q_options[idx]) if 0 <= idx < len(q_options) else raw_answer
+            else:
+                q_answer = str(raw_answer) if raw_answer is not None else ""
             q_type = q.get("question_type") or request.question_type
             q_difficulty = q.get("difficulty") or request.difficulty
             new_q = QuestionDB(
@@ -223,7 +233,7 @@ async def export_exam_word(exam_id: str, db: Session = Depends(get_db)):
 
     doc = Document()
     doc.add_heading(exam.title, 0)
-    doc.add_paragraph(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d')}")
+    doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d')}")
     doc.add_paragraph(f"Total Questions: {len(questions)}")
     doc.add_paragraph("")
 
@@ -415,6 +425,8 @@ async def upload_performance_sheet(
 #     return {"message": f"Successfully processed {records_added} records from the sheet"}    
 
 app.include_router(analysis.router)
+app.include_router(lecture.router)
+app.include_router(courses_router.router)
 
 
 #submission------------
@@ -676,26 +688,7 @@ async def update_grade(submission_id: int, data: dict, db: Session = Depends(get
     db.commit()
     return {"message": "Success"}
 
-@app.post("/courses")
-async def create_course(course: CourseCreate, db: Session = Depends(get_db)):
-    try:
-        new_course = CourseDB(
-            user_id=course.user_id,
-            code=course.code,
-            name=course.name,
-            semester=course.semester,
-            department=course.department,
-            students=0,       # Initializing with default values
-            progress=0,
-            status="active"
-        )
-        db.add(new_course)
-        db.commit()
-        db.refresh(new_course)
-        return new_course
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+# /courses POST is handled by routes/courses.py router
 
 
 

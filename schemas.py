@@ -75,7 +75,7 @@ class ExamRequest(BaseModel):
 class Question(BaseModel):
     question_text: str
     options: Optional[List[str]] = None
-    correct_answer: str
+    correct_answer: Optional[str] = None
     explanation: str
     difficulty: str
     question_type: str = "MCQ"

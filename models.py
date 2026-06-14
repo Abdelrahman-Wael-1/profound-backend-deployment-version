@@ -110,8 +110,8 @@ class SubmissionDB(Base):
 class PerformanceDB(Base):
     __tablename__ = "performance"
     id = Column(Integer, primary_key=True)
-    student_id = Column(Integer, ForeignKey("students.id"))
-    course_id = Column(Integer, ForeignKey("courses.id"))
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"))
     grade = Column(Float)
     attendance = Column(Integer)
     created_at = Column(DateTime, default=func.now())
@@ -119,8 +119,8 @@ class PerformanceDB(Base):
 class ErrorAnalysisDB(Base):
     __tablename__ = "error_analysis"
     id = Column(Integer, primary_key=True)
-    student_id = Column(Integer, ForeignKey("students.id"))
-    course_id = Column(Integer, ForeignKey("courses.id"))
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"))
     assignment_name = Column(String)
     error_category = Column(String)
     error_type = Column(String)  
@@ -159,3 +159,12 @@ class GradeUpdate(BaseModel):
     status: str
 class FinalizeRequest(BaseModel):
     manual_grade: int
+
+class LectureSlotDB(Base):
+    __tablename__ = "lecture_slots"
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"))
+    day = Column(String(20))       # e.g. "Monday"
+    start_time = Column(String(10)) # e.g. "09:00"
+    end_time = Column(String(10))   # e.g. "10:30"
+    room = Column(String(100))      # e.g. "Building A, Room 201"

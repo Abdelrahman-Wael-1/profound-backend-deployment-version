@@ -3,7 +3,7 @@ import json
 from groq import Groq
 import re
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY_GRADING"))
 
 
 def safe_parse_ai_response(text: str):

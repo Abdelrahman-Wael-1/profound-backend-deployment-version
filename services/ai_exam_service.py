@@ -7,7 +7,7 @@ from schemas import ExamRequest, Question
 
 class ExamGeneratorService:
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        self.client = Groq(api_key=os.getenv("GROQ_API_KEY_EXAM"))
 
     async def generate_exam_content(self, request: ExamRequest):
         """
@@ -21,11 +21,14 @@ class ExamGeneratorService:
         Return ONLY a JSON object with a key "questions" containing a list of objects.
         Each object MUST use these exact keys:
         "question_text": (the question string)
-        "question_type": "{request.question_type}"
-        "options": (list of 4 strings for MCQ, or null for Essay)
-        "correct_answer": (the correct answer string)
-        "explanation": (why the answer is correct)
+        "question_type": either "MCQ" or "Essay"
+        "options": (list of 4 strings for MCQ questions, or null for Essay questions)
+        "correct_answer": (for MCQ: copy the FULL TEXT of the correct option exactly as it appears in "options" — never use A/B/C/D letters or index numbers. For Essay: a model answer string — never null or empty)
+        "explanation": (why the answer is correct or what a good answer should cover)
         "difficulty": "{request.difficulty}"
+
+        {"For Mix type: randomly distribute between MCQ and Essay questions." if request.question_type == "Mix" else ""}
+        IMPORTANT: correct_answer must ALWAYS be a non-empty string. For Essay questions write a concise model answer.
         """
 
         completion = self.client.chat.completions.create(

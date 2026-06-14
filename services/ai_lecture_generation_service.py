@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
 from fastapi import HTTPException
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY_LECTURE"))
 
 MAX_SLIDES = 70
 MIN_SLIDES = 3
