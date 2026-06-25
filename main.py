@@ -355,8 +355,23 @@ def delete_graduation_project(project_id: int, db: Session = Depends(get_db)):
     return {"message": "Graduation project deleted"}
 
 
+@app.get("/graduation-projects/{project_id}/view")
+def view_graduation_document(project_id: int, db: Session = Depends(get_db)):
+    """Serves the PDF inline so the browser opens it in a new tab."""
+    proj = db.query(GraduationProjectDB).filter(GraduationProjectDB.id == project_id).first()
+    if not proj or not proj.document_path or not os.path.exists(proj.document_path):
+        raise HTTPException(status_code=404, detail="Document not found")
+    filename = os.path.basename(proj.document_path)
+    return StreamingResponse(
+        open(proj.document_path, "rb"),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename={filename}"},
+    )
+
+
 @app.get("/graduation-projects/{project_id}/download")
 def download_graduation_document(project_id: int, db: Session = Depends(get_db)):
+    """Forces a file download."""
     proj = db.query(GraduationProjectDB).filter(GraduationProjectDB.id == project_id).first()
     if not proj or not proj.document_path or not os.path.exists(proj.document_path):
         raise HTTPException(status_code=404, detail="Document not found")
