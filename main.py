@@ -1473,11 +1473,15 @@ async def get_general_submissions(user_id: int, db: Session = Depends(get_db)):
 
 @app.put("/api/submissions/{submission_id}")
 def update_submission_grade_api(submission_id: int, data: GradeUpdate, db: Session = Depends(get_db)):
+    """
+    Used by the AI grading module's Finalize button.
+    Writes to manual_grade (not ai_grade) so the original AI score is preserved.
+    """
     submission = db.query(SubmissionDB).filter(SubmissionDB.id == submission_id).first()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    submission.ai_grade = data.ai_grade
+    submission.manual_grade = data.ai_grade   # field name is legacy; value is the professor's override
     submission.status = data.status
     db.commit()
     return {"message": "Grade updated successfully"}
@@ -1574,47 +1578,146 @@ async def export_grades_excel(assignment_id: int, db: Session = Depends(get_db))
 # ──  exporting assignment grades  ────────────────────────────────────────────────────────
 @app.get("/export-grades-pdf/{assignment_id}")
 async def export_grades_pdf(assignment_id: int, db: Session = Depends(get_db)):
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
+
     assignment = db.query(AssignmentDB).filter(AssignmentDB.id == assignment_id).first()
     if not assignment:
         raise HTTPException(404, "Assignment not found")
-    submissions = db.query(SubmissionDB).filter(SubmissionDB.assignment_id == assignment_id).all()
-    data = [["Student Name", "AI Grade", "Manual Grade", "Final Grade", "Plagiarism", "Submission Date", "Status"]]
+
+    submissions = db.query(SubmissionDB).filter(
+        SubmissionDB.assignment_id == assignment_id
+    ).all()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
+    )
+    styles = getSampleStyleSheet()
+
+    heading_style = ParagraphStyle(
+        "Heading", parent=styles['Heading2'],
+        fontSize=11, textColor=colors.HexColor("#4F46E5"), spaceAfter=4
+    )
+    label_style = ParagraphStyle(
+        "Label", parent=styles['Normal'],
+        fontSize=8, textColor=colors.HexColor("#6B7280"), spaceBefore=4
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles['Normal'],
+        fontSize=9, leading=13, leftIndent=10
+    )
+    feedback_style = ParagraphStyle(
+        "Feedback", parent=styles['Normal'],
+        fontSize=9, leading=13, leftIndent=10,
+        textColor=colors.HexColor("#065F46"),
+        backColor=colors.HexColor("#ECFDF5")
+    )
+
+    elements = [
+        Paragraph(f"Grades: {assignment.assignment_name}", styles['Title']),
+        Spacer(1, 0.15 * inch),
+    ]
+
+    # ── Summary table ─────────────────────────────────────────────────────────
+    table_data = [[
+        "Student Name", "AI Grade", "Manual Grade",
+        "Final Grade", "Plagiarism", "Date", "Status"
+    ]]
     for sub in submissions:
-        final_grade = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
-        data.append([
+        final = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
+        table_data.append([
             sub.student_name or "",
-            str(sub.ai_grade) if sub.ai_grade is not None else "",
-            str(sub.manual_grade) if sub.manual_grade is not None else "",
-            str(final_grade) if final_grade is not None else "",
-            str(sub.plagiarism_score) if sub.plagiarism_score is not None else "",
+            str(sub.ai_grade)         if sub.ai_grade         is not None else "—",
+            str(sub.manual_grade)     if sub.manual_grade     is not None else "—",
+            str(final)                if final                is not None else "—",
+            str(sub.plagiarism_score) if sub.plagiarism_score is not None else "0",
             sub.submission_time.strftime("%Y-%m-%d %H:%M") if sub.submission_time else "",
             sub.status or "",
         ])
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    styles = getSampleStyleSheet()
-    title_style = styles['Title']
-    title = Paragraph(f"Grades for Assignment: {assignment.assignment_name}", title_style)
 
-    table = Table(data, repeatRows=1)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.grey),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 10),
-        ('BOTTOMPADDING', (0,0), (-1,0), 8),
-        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
-        ('GRID', (0,0), (-1,-1), 1, colors.black),
+    summary_table = Table(table_data, repeatRows=1,
+                          colWidths=[1.4*inch, 0.7*inch, 0.9*inch,
+                                     0.7*inch, 0.7*inch, 1.2*inch, 0.7*inch])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1,  0), colors.HexColor("#4F46E5")),
+        ('TEXTCOLOR',     (0, 0), (-1,  0), colors.white),
+        ('FONTNAME',      (0, 0), (-1,  0), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 8),
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F4F6")]),
+        ('GRID',          (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]))
-    elements = [title, Spacer(1, 0.2*inch), table]
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    # ── Per-student feedback ──────────────────────────────────────────────────
+    elements.append(Paragraph("Detailed Feedback per Student", heading_style))
+    elements.append(HRFlowable(width="100%", thickness=1,
+                                color=colors.HexColor("#4F46E5"), spaceAfter=8))
+
+    for sub in submissions:
+        report = sub.grade_report or {}
+        final  = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
+
+        header_data = [[
+            Paragraph(f"<b>{sub.student_name or 'Unknown'}</b>", body_style),
+            Paragraph(f"AI: {sub.ai_grade}%", body_style),
+            Paragraph(
+                f"<b>Final: {final}%</b>" +
+                (f" (Professor override from {sub.ai_grade}%)" if sub.manual_grade is not None else ""),
+                body_style
+            ),
+        ]]
+        header_table = Table(header_data, colWidths=[2.5*inch, 1.2*inch, 3.5*inch])
+        header_table.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor("#EEF2FF")),
+            ('TOPPADDING',    (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+            ('BOX',           (0, 0), (-1, -1), 0.5, colors.HexColor("#4F46E5")),
+        ]))
+        elements.append(header_table)
+        elements.append(Spacer(1, 4))
+
+        summary = (report.get("summary") or "").strip()
+        if summary:
+            elements.append(Paragraph("Overall Assessment:", label_style))
+            elements.append(Paragraph(summary, feedback_style))
+            elements.append(Spacer(1, 3))
+
+        strengths = report.get("strengths") or []
+        if strengths:
+            elements.append(Paragraph("Strengths:", label_style))
+            for s in strengths:
+                elements.append(Paragraph(f"✓ {s}", body_style))
+            elements.append(Spacer(1, 3))
+
+        improvements = report.get("areas_for_improvement") or report.get("improvements") or []
+        if improvements:
+            elements.append(Paragraph("Areas for Improvement:", label_style))
+            for im in improvements:
+                elements.append(Paragraph(f"△ {im}", body_style))
+            elements.append(Spacer(1, 3))
+
+        rec = (report.get("recommendation") or "").strip()
+        if rec:
+            elements.append(Paragraph("Recommendation:", label_style))
+            elements.append(Paragraph(rec, feedback_style))
+
+        elements.append(Spacer(1, 0.2 * inch))
+        elements.append(HRFlowable(width="100%", thickness=0.5,
+                                    color=colors.HexColor("#E5E7EB"), spaceAfter=6))
+
     doc.build(elements)
     buffer.seek(0)
+
     filename = f"grades_{assignment.assignment_name}.pdf"
     return StreamingResponse(
         buffer,
@@ -1655,42 +1758,147 @@ async def export_general_excel(user_id: int, db: Session = Depends(get_db)):
 
 @app.get("/export-general-pdf/{user_id}")
 async def export_general_pdf(user_id: int, db: Session = Depends(get_db)):
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+
     submissions = db.query(SubmissionDB).filter(
-        SubmissionDB.user_id == user_id,
-        SubmissionDB.assignment_id == None
+        SubmissionDB.assignment_id == None,
+        SubmissionDB.user_id == user_id
     ).all()
 
-    table_data = [["Student Name", "AI Grade", "Manual Grade", "Final Grade", "Plagiarism", "Submission Date", "Status"]]
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
+    )
+    styles = getSampleStyleSheet()
+
+    title_style = styles['Title']
+    heading_style = ParagraphStyle(
+        "Heading", parent=styles['Heading2'],
+        fontSize=11, textColor=colors.HexColor("#4F46E5"), spaceAfter=4
+    )
+    label_style = ParagraphStyle(
+        "Label", parent=styles['Normal'],
+        fontSize=8, textColor=colors.HexColor("#6B7280"), spaceBefore=4
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles['Normal'],
+        fontSize=9, leading=13, leftIndent=10
+    )
+    feedback_style = ParagraphStyle(
+        "Feedback", parent=styles['Normal'],
+        fontSize=9, leading=13, leftIndent=10,
+        textColor=colors.HexColor("#065F46"),
+        backColor=colors.HexColor("#ECFDF5")
+    )
+
+    elements = [
+        Paragraph(f"General Grades Report — User {user_id}", title_style),
+        Spacer(1, 0.15 * inch),
+    ]
+
+    # ── Summary table at the top ──────────────────────────────────────────────
+    table_data = [[
+        "Student Name", "AI Grade", "Manual Grade",
+        "Final Grade", "Plagiarism", "Date", "Status"
+    ]]
     for sub in submissions:
-        final_grade = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
+        final = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
         table_data.append([
             sub.student_name or "",
-            str(sub.ai_grade) if sub.ai_grade is not None else "",
-            str(sub.manual_grade) if sub.manual_grade is not None else "",
-            str(final_grade) if final_grade is not None else "",
-            str(sub.plagiarism_score) if sub.plagiarism_score is not None else "",
+            str(sub.ai_grade)        if sub.ai_grade        is not None else "—",
+            str(sub.manual_grade)    if sub.manual_grade    is not None else "—",
+            str(final)               if final               is not None else "—",
+            str(sub.plagiarism_score) if sub.plagiarism_score is not None else "0",
             sub.submission_time.strftime("%Y-%m-%d %H:%M") if sub.submission_time else "",
             sub.status or "",
         ])
 
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    styles = getSampleStyleSheet()
-    title = Paragraph(f"General Grades (User {user_id})", styles['Title'])
-
-    table = Table(table_data, repeatRows=1)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.grey),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 10),
-        ('BOTTOMPADDING', (0,0), (-1,0), 8),
-        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
-        ('GRID', (0,0), (-1,-1), 1, colors.black),
+    summary_table = Table(table_data, repeatRows=1,
+                          colWidths=[1.4*inch, 0.7*inch, 0.9*inch,
+                                     0.7*inch, 0.7*inch, 1.2*inch, 0.7*inch])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1,  0), colors.HexColor("#4F46E5")),
+        ('TEXTCOLOR',     (0, 0), (-1,  0), colors.white),
+        ('FONTNAME',      (0, 0), (-1,  0), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 8),
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('BACKGROUND',    (0, 1), (-1, -1), colors.HexColor("#F9FAFB")),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F4F6")]),
+        ('GRID',          (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.25 * inch))
 
-    elements = [title, Spacer(1, 0.2*inch), table]
+    # ── Per-student feedback section ──────────────────────────────────────────
+    elements.append(Paragraph("Detailed Feedback per Student", heading_style))
+    elements.append(HRFlowable(width="100%", thickness=1,
+                                color=colors.HexColor("#4F46E5"), spaceAfter=8))
+
+    for sub in submissions:
+        report = sub.grade_report or {}
+        final  = sub.manual_grade if sub.manual_grade is not None else sub.ai_grade
+
+        # Student header row
+        header_data = [[
+            Paragraph(f"<b>{sub.student_name or 'Unknown'}</b>", body_style),
+            Paragraph(f"AI: {sub.ai_grade}%", body_style),
+            Paragraph(
+                f"<b>Final: {final}%</b>" +
+                (f" (Professor override from {sub.ai_grade}%)" if sub.manual_grade is not None else ""),
+                body_style
+            ),
+        ]]
+        header_table = Table(header_data, colWidths=[2.5*inch, 1.2*inch, 3.5*inch])
+        header_table.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor("#EEF2FF")),
+            ('TOPPADDING',    (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+            ('BOX',           (0, 0), (-1, -1), 0.5, colors.HexColor("#4F46E5")),
+        ]))
+        elements.append(header_table)
+        elements.append(Spacer(1, 4))
+
+        # Summary
+        summary = (report.get("summary") or "").strip()
+        if summary:
+            elements.append(Paragraph("Overall Assessment:", label_style))
+            elements.append(Paragraph(summary, feedback_style))
+            elements.append(Spacer(1, 3))
+
+        # Strengths
+        strengths = report.get("strengths") or []
+        if strengths:
+            elements.append(Paragraph("Strengths:", label_style))
+            for s in strengths:
+                elements.append(Paragraph(f"✓ {s}", body_style))
+            elements.append(Spacer(1, 3))
+
+        # Areas for improvement
+        improvements = report.get("areas_for_improvement") or report.get("improvements") or []
+        if improvements:
+            elements.append(Paragraph("Areas for Improvement:", label_style))
+            for im in improvements:
+                elements.append(Paragraph(f"△ {im}", body_style))
+            elements.append(Spacer(1, 3))
+
+        # Recommendation
+        rec = (report.get("recommendation") or "").strip()
+        if rec:
+            elements.append(Paragraph("Recommendation:", label_style))
+            elements.append(Paragraph(rec, feedback_style))
+
+        elements.append(Spacer(1, 0.2 * inch))
+        elements.append(HRFlowable(width="100%", thickness=0.5,
+                                    color=colors.HexColor("#E5E7EB"), spaceAfter=6))
+
     doc.build(elements)
     buffer.seek(0)
 
