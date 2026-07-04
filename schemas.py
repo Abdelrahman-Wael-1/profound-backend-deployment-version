@@ -146,3 +146,4 @@ class AnalysisRequest(BaseModel):
     days: Optional[int] = None
     from_date: Optional[str] = None
     to_date: Optional[str] = None
+    user_id: Optional[int] = None

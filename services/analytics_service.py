@@ -30,9 +30,11 @@ from reportlab.platypus import (
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.enums import TA_LEFT
 
-def get_courses(db):
-    courses = db.query(CourseDB).all()
-
+def get_courses(db, user_id: int = None):
+    query = db.query(CourseDB)
+    if user_id:
+        query = query.filter(CourseDB.user_id == user_id)
+    courses = query.all()
     return [
         {
             "id": c.id,
@@ -42,6 +44,16 @@ def get_courses(db):
         }
         for c in courses
     ]
+
+def get_semesters(db):
+    rows = (
+        db.query(CourseDB.semester)
+        .filter(CourseDB.semester.isnot(None), CourseDB.semester != "")
+        .distinct()
+        .order_by(CourseDB.semester)
+        .all()
+    )
+    return [r[0] for r in rows]
 def apply_filters(
     query,
     model,
@@ -50,14 +62,17 @@ def apply_filters(
     days=None,
     from_date=None,
     to_date=None,
-    join_course=False
+    join_course=False,
+    user_id=None
 ):
-
-    if join_course or semester:
+    if join_course or semester or user_id:
         query = query.join(
             CourseDB,
             CourseDB.id == model.course_id
         )
+
+    if user_id:
+        query = query.filter(CourseDB.user_id == user_id)
 
     if course_id:
         query = query.filter(model.course_id == course_id)
@@ -73,30 +88,72 @@ def apply_filters(
         query = query.filter(model.created_at.between(from_date, to_date))
 
     return query
-#  PERFORMANCE DISTRIBUTION 
+#  PERFORMANCE DISTRIBUTION
 
-def get_performance_distribution(db, course_id=None, semester=None, days=None, from_date=None, to_date=None):
+def _latest_week_bounds(db, course_id=None, semester=None, user_id=None):
+    """
+    Return (week_start, week_end) for the most recent calendar week
+    that has at least one performance record — filtered by course/semester/user.
+    """
+    q = db.query(func.max(PerformanceDB.created_at).label("mx"))
+    if course_id:
+        q = q.filter(PerformanceDB.course_id == course_id)
+    if user_id and not course_id:
+        q = q.join(CourseDB, CourseDB.id == PerformanceDB.course_id)
+        q = q.filter(CourseDB.user_id == user_id)
+    if semester and semester.strip() and semester != "All Semesters":
+        if not (user_id and not course_id):   # avoid double join
+            q = q.join(CourseDB, CourseDB.id == PerformanceDB.course_id)
+        q = q.filter(CourseDB.semester == semester.strip())
+    latest = q.scalar()
 
-    query = db.query(PerformanceDB.grade, PerformanceDB.course_id)
+    if latest is None:
+        return None, None
 
-    query = apply_filters(
-        query,
-        PerformanceDB,
-        course_id,
-        semester,
-        days,
-        from_date,
-        to_date,
-        join_course=True
+    week_start = latest - timedelta(
+        days=latest.weekday(),
+        hours=latest.hour,
+        minutes=latest.minute,
+        seconds=latest.second,
+        microseconds=latest.microsecond,
     )
+    week_end = week_start + timedelta(weeks=1)
+    return week_start, week_end
+
+
+def get_performance_distribution(db, course_id=None, semester=None, days=None, from_date=None, to_date=None, user_id=None):
+    """Always shows the grade breakdown for the LATEST week in the DB,
+    regardless of the days/from_date/to_date filter passed by the caller."""
+
+    week_start, week_end = _latest_week_bounds(db, course_id=course_id, semester=semester, user_id=user_id)
+
+    query = db.query(PerformanceDB.grade)
+
+    if user_id and not course_id:
+        query = query.join(CourseDB, CourseDB.id == PerformanceDB.course_id)
+        query = query.filter(CourseDB.user_id == user_id)
+
+    if course_id:
+        query = query.filter(PerformanceDB.course_id == course_id)
+
+    if semester and semester.strip() and semester != "All Semesters":
+        if not (user_id and not course_id):   # avoid double join
+            query = query.join(CourseDB, CourseDB.id == PerformanceDB.course_id)
+        query = query.filter(CourseDB.semester == semester.strip())
+
+    if week_start is not None:
+        query = query.filter(
+            PerformanceDB.created_at >= week_start,
+            PerformanceDB.created_at < week_end,
+        )
 
     grades = [g[0] for g in query.all()]
 
     dist = {
         "Excellent (90-100)": 0,
         "Good (80-89)": 0,
-        "Average (70-79)": 0,
-        "At-Risk (<70)": 0
+        "Average (50-79)": 0,
+        "At-Risk (<50)": 0
     }
 
     for g in grades:
@@ -104,10 +161,10 @@ def get_performance_distribution(db, course_id=None, semester=None, days=None, f
             dist["Excellent (90-100)"] += 1
         elif g >= 80:
             dist["Good (80-89)"] += 1
-        elif g >= 70:
-            dist["Average (70-79)"] += 1
+        elif g >= 50:
+            dist["Average (50-79)"] += 1
         else:
-            dist["At-Risk (<70)"] += 1
+            dist["At-Risk (<50)"] += 1
 
     return dist
 # Attendance_Correlation
@@ -117,7 +174,8 @@ def get_attendance_correlation_report(
     semester=None,
     days=None,
     from_date=None,
-    to_date=None
+    to_date=None,
+    user_id=None
 ):
 
     query = db.query(PerformanceDB.attendance, PerformanceDB.grade)
@@ -130,7 +188,8 @@ def get_attendance_correlation_report(
         days,
         from_date,
         to_date,
-        join_course=True
+        join_course=True,
+        user_id=user_id
     )
 
     data = query.all()
@@ -187,14 +246,15 @@ def get_prediction(
     semester=None,
     days=None,
     from_date=None,
-    to_date=None
+    to_date=None,
+    user_id=None
 ):
 
     query = db.query(
         func.date_trunc('week', PerformanceDB.created_at).label('week_start'),
         func.avg(PerformanceDB.grade).label('avg_grade'),
         func.sum(
-            case((PerformanceDB.grade < 70, 1), else_=0)
+            case((PerformanceDB.grade < 50, 1), else_=0)
         ).label("at_risk_count")
     )
 
@@ -206,7 +266,8 @@ def get_prediction(
         days,
         from_date,
         to_date,
-        join_course=True
+        join_course=True,
+        user_id=user_id
     )
 
     weekly_data = query.group_by("week_start").order_by("week_start").all()
@@ -217,6 +278,8 @@ def get_prediction(
     X = np.arange(len(weekly_data))
     y = np.array([float(w.avg_grade) for w in weekly_data])
 
+    # Use degree 2 for 5+ weeks, degree 1 for fewer.
+    # Degree 2 gives a smooth arc that visibly diverges from actual weekly dots.
     if len(weekly_data) >= 8:
         degree = 3
     elif len(weekly_data) >= 5:
@@ -237,6 +300,8 @@ def get_prediction(
     X_all_poly = poly.transform(X_all.reshape(-1, 1))
 
     preds = model.predict(X_all_poly)
+    # Clamp to valid grade range — polynomial extrapolation can exceed 100
+    preds = np.clip(preds, 0, 100)
 
     chart = []
 
@@ -256,7 +321,7 @@ def get_prediction(
             "at_risk_students": None
         })
 
-    last_pred = round(preds[-1], 1)
+    last_pred = round(float(preds[-1]), 1)
 
     last_risk = next(
         (c["at_risk_students"] for c in reversed(chart) if c["at_risk_students"] is not None),
@@ -280,7 +345,7 @@ def get_prediction(
         }
     }
 ### common_error_analysis
-def common_error_analysis(db, course_id=None, semester=None, days=None, from_date=None, to_date=None):
+def common_error_analysis(db, course_id=None, semester=None, days=None, from_date=None, to_date=None, user_id=None):
     """
     Returns one entry per error category (Conceptual, Structural, Language,
     Completeness) with:
@@ -289,11 +354,6 @@ def common_error_analysis(db, course_id=None, semester=None, days=None, from_dat
       - affected_students : distinct students who had this category of error
       - notes          : list of the AI-generated descriptions (one per submission)
                          so the professor can read actual error details
-
-    The old approach tried to GROUP BY error_type (raw AI text) which produced
-    occurrences=1 / affected_students=1 for every row because every AI description
-    is unique text.  We no longer aggregate by description — descriptions are
-    shown as individual notes instead.
     """
 
     # ── base filtered query ───────────────────────────────────────────────
@@ -301,7 +361,7 @@ def common_error_analysis(db, course_id=None, semester=None, days=None, from_dat
     base_q = apply_filters(
         base_q, ErrorAnalysisDB,
         course_id, semester, days, from_date, to_date,
-        join_course=True
+        join_course=True, user_id=user_id
     )
 
     total_errors = base_q.count()
@@ -309,15 +369,22 @@ def common_error_analysis(db, course_id=None, semester=None, days=None, from_dat
         return []
 
     # ── Step 1: count rows per category ──────────────────────────────────
+    from sqlalchemy import case as sa_case
+
+    student_surrogate = sa_case(
+        (ErrorAnalysisDB.student_id.isnot(None), ErrorAnalysisDB.student_id),
+        else_=ErrorAnalysisDB.id,
+    )
+
     cat_q = db.query(
         ErrorAnalysisDB.error_category,
         func.count(ErrorAnalysisDB.id).label("count"),
-        func.count(func.distinct(ErrorAnalysisDB.student_id)).label("students"),
+        func.count(func.distinct(student_surrogate)).label("students"),
     )
     cat_q = apply_filters(
         cat_q, ErrorAnalysisDB,
         course_id, semester, days, from_date, to_date,
-        join_course=True
+        join_course=True, user_id=user_id
     )
     categories = (
         cat_q
@@ -337,7 +404,7 @@ def common_error_analysis(db, course_id=None, semester=None, days=None, from_dat
     rows_q = apply_filters(
         rows_q, ErrorAnalysisDB,
         course_id, semester, days, from_date, to_date,
-        join_course=True
+        join_course=True, user_id=user_id
     )
     all_rows = rows_q.order_by(ErrorAnalysisDB.created_at.desc()).all()
 
@@ -604,9 +671,13 @@ def get_at_risk_students(
     department_id=None
 ):
     """
-    Get filtered students and calculate risk using:
-    Grade + Attendance
+    Return at-risk students based ONLY on their most recent week's record.
+    'Most recent week' = the latest calendar week (date_trunc) that has
+    any performance data, so uploading a new week automatically replaces
+    the previous week's at-risk list.
     """
+
+    week_start, week_end = _latest_week_bounds(db, course_id=course_id, semester=semester)
 
     query = db.query(
         StudentDB.student_id.label("student_id"),
@@ -619,10 +690,7 @@ def get_at_risk_students(
     )
 
     if course_id:
-        query = query.filter(
-            PerformanceDB.course_id == course_id
-        )
-
+        query = query.filter(PerformanceDB.course_id == course_id)
 
     if semester and semester.strip() and semester != "All Semesters":
         query = query.join(
@@ -633,10 +701,14 @@ def get_at_risk_students(
         )
 
     if department_id:
-        query = query.filter(
-            StudentDB.department_id == department_id
-        )
+        query = query.filter(StudentDB.department_id == department_id)
 
+    # Restrict to the latest week only
+    if week_start is not None:
+        query = query.filter(
+            PerformanceDB.created_at >= week_start,
+            PerformanceDB.created_at < week_end,
+        )
 
     students = query.all()
 
@@ -669,8 +741,8 @@ def get_at_risk_students(
 
 
         # Risk level
-        # Direct grade override: below 55 is always High risk
-        if float(student.grade) < 55:
+        # Direct grade override: below 50 is always High risk
+        if float(student.grade) < 50:
             risk_level = "High"
 
         elif risk_score >= 60:
@@ -736,11 +808,11 @@ def generate_recommendations(perf_dist, correlation, errors, prediction, at_risk
     at_risk_count  = len(at_risk_list)
 
     if total_students > 0:
-        at_risk_pct    = (perf_dist.get("At-Risk (<70)", 0) / total_students) * 100
+        at_risk_pct    = (perf_dist.get("At-Risk (<50)", 0) / total_students) * 100
         excellent_pct  = (perf_dist.get("Excellent (90-100)", 0) / total_students) * 100
         avg_grade_vals = []
         weights        = {"Excellent (90-100)": 95, "Good (80-89)": 84,
-                          "Average (70-79)": 74, "At-Risk (<70)": 55}
+                          "Average (50-79)": 65, "At-Risk (<50)": 35}
         for bucket, cnt in perf_dist.items():
             avg_grade_vals.extend([weights.get(bucket, 60)] * cnt)
         class_avg = sum(avg_grade_vals) / len(avg_grade_vals) if avg_grade_vals else 0
@@ -749,7 +821,7 @@ def generate_recommendations(perf_dist, correlation, errors, prediction, at_risk
             recs.append({
                 "priority": "High",
                 "area": "Overall Performance",
-                "finding": f"{at_risk_pct:.0f}% of students are below 70 — class average is approximately {class_avg:.0f}%.",
+                "finding": f"{at_risk_pct:.0f}% of students are below 50 — class average is approximately {class_avg:.0f}%.",
                 "action": (
                     "Conduct an urgent course review session. Revisit foundational topics "
                     "and consider simplifying assessment difficulty or adding remedial materials."
@@ -759,14 +831,14 @@ def generate_recommendations(perf_dist, correlation, errors, prediction, at_risk
             recs.append({
                 "priority": "Medium",
                 "area": "Overall Performance",
-                "finding": f"{at_risk_pct:.0f}% of students are below 70.",
+                "finding": f"{at_risk_pct:.0f}% of students are below 50.",
                 "action": (
                     "Schedule targeted revision sessions for weaker topics. "
                     "Identify the specific modules where grades drop and reinforce them."
                 ),
             })
 
-        if excellent_pct >= 50 and at_risk_pct <= 10:
+        if excellent_pct >= 50 and at_risk_pct <= 5:
             recs.append({
                 "priority": "Low",
                 "area": "Overall Performance",
@@ -918,9 +990,11 @@ def export_report(
         _perf_all, _corr_all, _err_all, _pred_all, _risk_all
     )
 
+    # Grade distribution always uses the latest week in the DB (handled
+    # inside get_performance_distribution automatically).
     if getattr(config, "grade_distribution", False):
         data["performance"] = get_performance_distribution(
-            db, course_id, semester, days, from_date, to_date
+            db, course_id, semester, None, None, None
         )
 
     if getattr(config, "predictive_analytics", False):
@@ -948,6 +1022,7 @@ def export_report(
             db, course_id, semester, days, from_date, to_date
         )
 
+    # At-risk is always last-7-days in the export
     if getattr(config, "include_at_risk", False):
         data["at_risk"] = get_at_risk_students(
             db, course_id=course_id, semester=semester

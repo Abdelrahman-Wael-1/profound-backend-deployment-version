@@ -515,7 +515,7 @@ def get_dashboard_stats(user_id: int, db: Session = Depends(get_db)):
 
         at_risk_count = sum(
             1 for grades in student_perf.values()
-            if (sum(grades) / len(grades)) < 70
+            if (sum(grades) / len(grades)) < 50
         )
     else:
         # Fall back to graded submissions
@@ -536,7 +536,7 @@ def get_dashboard_stats(user_id: int, db: Session = Depends(get_db)):
             key = s.student_name or f"sub_{s.id}"
             student_grade_map.setdefault(key, []).append(s.ai_grade)
         at_risk_count = sum(
-            1 for g in student_grade_map.values() if sum(g) / len(g) < 70
+            1 for g in student_grade_map.values() if sum(g) / len(g) < 50
         )
 
     # Submissions linked to assignments in the professor's courses
