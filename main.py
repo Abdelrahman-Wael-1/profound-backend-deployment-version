@@ -539,7 +539,8 @@ def get_dashboard_stats(user_id: int, db: Session = Depends(get_db)):
             1 for g in student_grade_map.values() if sum(g) / len(g) < 70
         )
 
-    pending_grading = (
+    # Submissions linked to assignments in the professor's courses
+    pending_assignment = (
         db.query(SubmissionDB)
         .join(AssignmentDB, SubmissionDB.assignment_id == AssignmentDB.id)
         .filter(
@@ -547,6 +548,18 @@ def get_dashboard_stats(user_id: int, db: Session = Depends(get_db)):
             SubmissionDB.status.in_(["pending", "ready"]),
         ).count()
     )
+
+    # General submissions (AI grading module — not linked to an assignment)
+    pending_general = (
+        db.query(SubmissionDB)
+        .filter(
+            SubmissionDB.user_id == user_id,
+            SubmissionDB.assignment_id == None,
+            SubmissionDB.status.in_(["pending", "ready"]),
+        ).count()
+    )
+
+    pending_grading = pending_assignment + pending_general
 
     return {
         "class_average":   class_average,
@@ -1055,6 +1068,7 @@ async def get_nested_assignments(course_id: int, db: Session = Depends(get_db)):
         result.append({
             "id": assign.id,
             "assignment_name": assign.assignment_name,
+            "assignment_question": assign.assignment_question,   # ← added
             "model_answer": assign.model_answer,
             "rubric": assign.rubric,
             "is_model_answer": assign.is_model_answer,
@@ -1072,6 +1086,39 @@ async def get_nested_assignments(course_id: int, db: Session = Depends(get_db)):
             ]
         })
     return result
+
+
+@app.put("/assignments/{assignment_id}")
+async def update_assignment(
+    assignment_id: int,
+    assignment_name: str = Form(...),
+    assignment_question: Optional[str] = Form(None),
+    is_model_answer: bool = Form(...),
+    model_answer: Optional[str] = Form(None),
+    rubric: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    assign = db.query(AssignmentDB).filter(AssignmentDB.id == assignment_id).first()
+    if not assign:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    assign.assignment_name     = assignment_name
+    assign.assignment_question = assignment_question
+    assign.is_model_answer     = is_model_answer
+    assign.model_answer        = model_answer if is_model_answer else None
+    assign.rubric              = rubric if not is_model_answer else None
+
+    db.commit()
+    db.refresh(assign)
+    return {
+        "message": "Assignment updated",
+        "id": assign.id,
+        "assignment_name": assign.assignment_name,
+        "assignment_question": assign.assignment_question,
+        "is_model_answer": assign.is_model_answer,
+        "model_answer": assign.model_answer,
+        "rubric": assign.rubric,
+    }
 
 
 @app.post("/grade-submission/{assignment_id}")
