@@ -51,7 +51,6 @@ try:
 except ImportError:
     create_pptx = None
 
-load_dotenv()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Profound Academic API")
@@ -66,9 +65,11 @@ app.add_middleware(
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY_ANALYSIS"))
 
-UPLOAD_DIR = "uploads/assignments"
+# Use /tmp on serverless (Vercel) and local uploads/ when running locally
+_TMP_BASE = "/tmp" if os.path.exists("/tmp") and not os.access(".", os.W_OK) else "uploads"
+UPLOAD_DIR = os.path.join(_TMP_BASE, "assignments")
+GRAD_DOCS_DIR = os.path.join(_TMP_BASE, "grad_projects")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-GRAD_DOCS_DIR = "uploads/grad_projects"
 os.makedirs(GRAD_DOCS_DIR, exist_ok=True)
 
 
